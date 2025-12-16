@@ -111,22 +111,10 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             f'uridecodebin uri="{video_source}" name={name} ! '
         )
     else:
-        # source_element = (
-        #     f'filesrc location="{video_source}" name={name} ! '
-        #     f'{QUEUE(name=f"{name}_queue_decode")} ! '
-        #     f'decodebin name={name}_decodebin ! '
-        # )
-
-        # 文件/JPEG 输入：先解码，再把单帧“冻结”为视频流，并强制成 Hailo 需要的 RGB 640x640
         source_element = (
             f'filesrc location="{video_source}" name={name} ! '
             f'{QUEUE(name=f"{name}_queue_decode")} ! '
             f'decodebin name={name}_decodebin ! '
-            'imagefreeze ! '
-            'videoconvert ! '
-            'videoscale ! '
-            f'video/x-raw,format=RGB,width={video_width},height={video_height},'
-            f'framerate={frame_rate}/1 ! '
         )
 
     # Set up the fps caps.
