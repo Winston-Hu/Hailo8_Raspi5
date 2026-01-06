@@ -6,15 +6,15 @@ checkreslabel_findnx.py
 
 功能：
 1) 日志：RotatingFileHandler，logs/checkreslabel_findnx_log.log，5MB，最多 3 个备份
-2) 在每天 10:00-22:00（Australia/Sydney）保持 active，其余时间 sleep
-3) 扫描 reslabel 中昨晚 22:00 到今日 06:00 的文件（按文件名时间戳顺序重放）
+2) 在每天 22:00-06:00（Australia/Sydney）保持 active，其余时间 sleep
+3) 夜间实时监控“当前这晚”的窗口（22:00 -> 次日 06:00），按文件名时间戳顺序处理
 4) “场景级违停”判定（不区分车辆ID）：
-   - 只要画面检测到车辆类 label 连续存在 >= 60 秒，则打印一次：
-     [WARNING] illegally parked vehicles: confirm_ts=... start_ts=... file=...
+   - 只要画面检测到车辆类 label 连续存在 >= 60 秒，则打印一次 CONFIRMED（不写 events.jsonl）
+   - 当车辆离开（或连续 miss 超过容忍阈值）事件结束时，写入一条完整时间段记录到 events.jsonl
    - 防抖：
      - 允许短暂 miss（检测不到车）不立刻结束事件：MISS_TOLERANCE_SEC
      - 若没有新文件产生，不进行“消失判定”（只做 stall 日志）
-5) 记录：每次 confirmed 追加写入 logs/illegally_parked_events.jsonl（便于后续调取）
+5) 记录：logs/illegally_parked_events.jsonl 每行都是完整事件段（start/confirm/end）
 """
 
 import time
@@ -42,11 +42,12 @@ EVENTS_FILE = LOG_DIR / "illegally_parked_events.jsonl"
 # =========================
 TZ = ZoneInfo("Australia/Sydney")
 
-ACTIVE_START = dtime(10, 0, 0)  # 10:00
-ACTIVE_END   = dtime(22, 0, 0)  # 22:00（不含 22:00 之后）
+# Active window：夜间实时监控 22:00 -> 06:00（跨午夜）
+ACTIVE_START = dtime(21, 0, 0)
+ACTIVE_END   = dtime(7, 0, 0)
 
-# 需要检查的“夜间”区间：昨晚 22:00 -> 今日 06:00
-NIGHT_START = dtime(22, 0, 0)
+# 夜间检查窗口：同样是 22:00 -> 06:00（实时“当前这晚”）
+NIGHT_START = dtime(7, 0, 0)
 NIGHT_END   = dtime(6, 0, 0)
 
 # =========================
@@ -62,12 +63,12 @@ VEHICLE_LABELS = {
 # =========================
 # 扫描间隔（active 时）
 # =========================
-POLL_INTERVAL_SEC = 2
+POLL_INTERVAL_SEC = 10
 
 # =========================
 # 违停判定参数
 # =========================
-PARK_THRESHOLD_SEC = 60          # 连续存在 >= 60s 触发一次违停
+PARK_THRESHOLD_SEC = 60          # 连续存在 >= 60s 触发一次违停确认
 MISS_TOLERANCE_SEC = 20          # 允许短暂 miss（检测不到车辆）的最大时长
 STALL_WARN_SEC = 60              # 最久没有新文件则记录 stall 警告（不影响状态机）
 
@@ -106,24 +107,49 @@ def now_syd() -> datetime:
 
 
 def is_active_window(dt: datetime) -> bool:
-    t = dt.timetz().replace(tzinfo=None)
-    return ACTIVE_START <= t < ACTIVE_END
+    # t = dt.timetz().replace(tzinfo=None)
+    #
+    # # 非跨午夜
+    # if ACTIVE_START < ACTIVE_END:
+    #     return ACTIVE_START <= t < ACTIVE_END
+    #
+    # # 跨午夜：22:00 -> 06:00
+    # return (t >= ACTIVE_START) or (t < ACTIVE_END)
+    return True
 
 
 def seconds_until_next_active(dt: datetime) -> int:
-    today_10 = dt.replace(hour=10, minute=0, second=0, microsecond=0)
-    if dt < today_10:
-        target = today_10
-    else:
-        target = today_10 + timedelta(days=1)
+    # 睡到下一次 ACTIVE_START（22:00）
+    target = dt.replace(hour=ACTIVE_START.hour, minute=ACTIVE_START.minute, second=0, microsecond=0)
+    if dt >= target:
+        target = target + timedelta(days=1)
     sec = int((target - dt).total_seconds())
     return max(sec, 1)
 
 
 def night_window_range(dt: datetime) -> tuple[datetime, datetime]:
+    """
+    夜间实时窗口（当前这晚）：
+    - 若当前时间在 22:00-24:00：窗口为 今天 22:00 -> 明天 06:00
+    - 若当前时间在 00:00-06:00：窗口为 昨天 22:00 -> 今天 06:00
+    - 其它时间：返回“下一次夜间窗口”（今天 22:00 -> 明天 06:00），用于日志/调试不出错
+    """
+    t = dt.timetz().replace(tzinfo=None)
     today = dt.date()
-    start = datetime.combine(today - timedelta(days=1), NIGHT_START, tzinfo=TZ)
-    end   = datetime.combine(today, NIGHT_END, tzinfo=TZ)
+
+    if t >= NIGHT_START:
+        start = datetime.combine(today, NIGHT_START, tzinfo=TZ)
+        end = datetime.combine(today + timedelta(days=1), NIGHT_END, tzinfo=TZ)
+        return start, end
+
+    if t < NIGHT_END:
+        start = datetime.combine(today - timedelta(days=1), NIGHT_START, tzinfo=TZ)
+        end = datetime.combine(today, NIGHT_END, tzinfo=TZ)
+        return start, end
+
+    # 白天：给一个“下一次夜间窗口”，不影响，因为白天本来也不扫描
+    start = datetime.combine(today, NIGHT_START, tzinfo=TZ)
+    end = datetime.combine(today + timedelta(days=1), NIGHT_END, tzinfo=TZ)
     return start, end
 
 
@@ -164,7 +190,7 @@ def file_contains_vehicle_label(file_path: Path) -> tuple[bool, set[str]]:
 
 def append_event_record(record: dict) -> None:
     """
-    追加写入 JSONL，便于后续调取。
+    追加写入 JSONL（每行一个完整事件段）
     """
     try:
         with open(EVENTS_FILE, "a", encoding="utf-8") as f:
@@ -183,23 +209,15 @@ class ParkingState:
 
 
 class ParkingEventFSM:
-    """
-    仅基于 (ts, has_vehicle) 序列判定“车辆持续存在 >= PARK_THRESHOLD_SEC”
-    - 防抖：允许 miss 但 miss 时长 <= MISS_TOLERANCE_SEC 不结束事件
-    - 仅在 PENDING -> CONFIRMED 时刻报警/记录一次
-    """
-
     def __init__(self):
         self.state = ParkingState.IDLE
         self.event_start_ts: datetime | None = None
         self.last_seen_vehicle_ts: datetime | None = None
         self.confirmed_ts: datetime | None = None
 
-        # 用于记录“事件确认时”对应的文件信息（便于追溯）
         self.start_file: str | None = None
         self.confirm_file: str | None = None
 
-        # 事件标签聚合（可选）
         self.labels_seen: set[str] = set()
 
     def reset(self):
@@ -211,13 +229,7 @@ class ParkingEventFSM:
         self.confirm_file = None
         self.labels_seen = set()
 
-    def update(self, ts: datetime, has_vehicle: bool, labels: set[str], filename: str):
-        """
-        输入一条“新观测”（来自一个新 reslabel 文件）
-        可能触发：
-        - 确认违停（返回一条 record dict）
-        - 或者无输出（返回 None）
-        """
+    def update(self, ts: datetime, has_vehicle: bool, labels: set[str], filename: str) -> dict | None:
         if has_vehicle:
             self.labels_seen |= set(labels)
 
@@ -229,11 +241,9 @@ class ParkingEventFSM:
                 logger.info("FSM: IDLE -> PENDING (start_ts=%s file=%s)", ts.isoformat(), filename)
                 return None
 
-            # PENDING / CONFIRMED：更新 last_seen
             if self.last_seen_vehicle_ts is None or ts > self.last_seen_vehicle_ts:
                 self.last_seen_vehicle_ts = ts
 
-            # 若是 PENDING，检查是否达到阈值
             if self.state == ParkingState.PENDING:
                 if self.event_start_ts is not None and self.last_seen_vehicle_ts is not None:
                     duration = (self.last_seen_vehicle_ts - self.event_start_ts).total_seconds()
@@ -241,27 +251,45 @@ class ParkingEventFSM:
                         self.state = ParkingState.CONFIRMED
                         self.confirmed_ts = ts
                         self.confirm_file = filename
-
-                        record = {
-                            "type": "illegally_parked_vehicle",
-                            "start_ts": self.event_start_ts.isoformat(),
-                            "confirm_ts": self.confirmed_ts.isoformat(),
+                        return {
+                            "type": "confirmed",
+                            "start_ts": self.event_start_ts,
+                            "confirm_ts": self.confirmed_ts,
                             "start_file": self.start_file,
                             "confirm_file": self.confirm_file,
                             "labels": sorted(self.labels_seen),
                             "duration_sec_at_confirm": int(duration),
                         }
-                        return record
 
-            # CONFIRMED：不重复记录
             return None
 
-        # has_vehicle == False：仅在有新观测时处理“可能结束”
+        # has_vehicle == False
         if self.state in (ParkingState.PENDING, ParkingState.CONFIRMED):
             if self.last_seen_vehicle_ts is not None:
                 gap = (ts - self.last_seen_vehicle_ts).total_seconds()
                 if gap > MISS_TOLERANCE_SEC:
-                    # 认为事件结束
+                    if self.state == ParkingState.CONFIRMED and self.event_start_ts and self.confirmed_ts:
+                        end_ts = ts
+                        record = {
+                            "type": "illegally_parked_vehicle",
+                            "start_ts": self.event_start_ts.isoformat(),
+                            "confirm_ts": self.confirmed_ts.isoformat(),
+                            "end_ts": end_ts.isoformat(),
+                            "start_file": self.start_file,
+                            "confirm_file": self.confirm_file,
+                            "end_file": filename,
+                            "labels": sorted(self.labels_seen),
+                            "duration_sec_total": int((end_ts - self.event_start_ts).total_seconds()),
+                        }
+                        logger.info(
+                            "FSM: CONFIRMED -> IDLE (end_ts=%s gap=%.1fs last_seen=%s)",
+                            end_ts.isoformat(),
+                            gap,
+                            self.last_seen_vehicle_ts.isoformat(),
+                        )
+                        self.reset()
+                        return {"type": "ended", "record": record}
+
                     logger.info(
                         "FSM: %s -> IDLE (end_ts=%s gap=%.1fs last_seen=%s)",
                         self.state,
@@ -272,7 +300,6 @@ class ParkingEventFSM:
                     self.reset()
             return None
 
-        # IDLE 且无车：无事发生
         return None
 
 
@@ -280,23 +307,14 @@ class ParkingEventFSM:
 # 扫描与处理
 # =========================
 def scan_reslabel_for_night(dt: datetime, processed: set[str], fsm: ParkingEventFSM, last_latest_ts_holder: dict) -> None:
-    """
-    扫描 reslabel 中属于昨晚 22:00 -> 今日 06:00 的文件；
-    对未处理过的文件，按时间顺序喂给状态机。
-    """
     start, end = night_window_range(dt)
     RESLABEL_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 仅记录一次窗口信息，避免每2秒刷屏
-    # 但仍然在日志里可见扫描行为
-    logger.debug("Night window: %s -> %s", start.isoformat(), end.isoformat())
 
     files = list(RESLABEL_DIR.glob("*.txt"))
     if not files:
         logger.info("No reslabel txt files found.")
         return
 
-    # 过滤：能解析出 ts 且落在窗口内的
     candidates: list[tuple[datetime, Path]] = []
     latest_ts_in_dir: datetime | None = None
 
@@ -311,29 +329,21 @@ def scan_reslabel_for_night(dt: datetime, processed: set[str], fsm: ParkingEvent
 
     # stall 检测（不影响 FSM）
     if latest_ts_in_dir is not None:
-        last_latest = last_latest_ts_holder.get("latest_ts")
         last_latest_ts_holder["latest_ts"] = latest_ts_in_dir
-
-        # 如果 latest_ts 没变，且 now - latest_ts 很久，则提示可能卡住
-        now_dt = dt
-        stall_age = (now_dt - latest_ts_in_dir).total_seconds()
+        stall_age = (dt - latest_ts_in_dir).total_seconds()
         if stall_age >= STALL_WARN_SEC:
             logger.warning(
                 "reslabel may be stalled: now=%s latest_file_ts=%s age=%.1fs",
-                now_dt.isoformat(),
+                dt.isoformat(),
                 latest_ts_in_dir.isoformat(),
                 stall_age,
             )
 
-        # 若 latest_ts 回退（理论不应发生），也记录一下
-        if last_latest is not None and latest_ts_in_dir < last_latest:
-            logger.warning("Latest reslabel ts moved backwards: %s -> %s", last_latest.isoformat(), latest_ts_in_dir.isoformat())
-
     if not candidates:
-        logger.info("No reslabel files within night window.")
+        # 夜间实时：如果窗口内暂时没文件，这是正常情况（上游还没生成）
+        logger.info("No reslabel files within current night window: %s -> %s", start.isoformat(), end.isoformat())
         return
 
-    # 时间顺序处理；同一秒多个文件也能稳定处理
     candidates.sort(key=lambda x: (x[0], x[1].name))
 
     for ts, fp in candidates:
@@ -343,29 +353,49 @@ def scan_reslabel_for_night(dt: datetime, processed: set[str], fsm: ParkingEvent
         hit, labels = file_contains_vehicle_label(fp)
         processed.add(fp.name)
 
-        # 喂给状态机
-        record = fsm.update(ts=ts, has_vehicle=hit, labels=labels, filename=fp.name)
+        out = fsm.update(ts=ts, has_vehicle=hit, labels=labels, filename=fp.name)
 
-        if record is not None:
-            # 仅在确认时刻输出一次
+        logger.info("Processed file=%s ts=%s has_vehicle=%s", fp.name, ts.isoformat(), hit)
+
+        if out is None:
+            continue
+
+        if out.get("type") == "confirmed":
             msg = (
-                f"[WARNING] illegally parked vehicles: "
-                f"confirm_ts={record['confirm_ts']} start_ts={record['start_ts']} file={record['confirm_file']}"
+                f"[WARNING] illegally parked vehicles (CONFIRMED): "
+                f"confirm_ts={out['confirm_ts'].isoformat()} start_ts={out['start_ts'].isoformat()} "
+                f"file={out['confirm_file']}"
             )
             print(msg)
             logger.warning(
                 "Illegally parked vehicles CONFIRMED. start_ts=%s confirm_ts=%s start_file=%s confirm_file=%s labels=%s duration=%ss",
+                out["start_ts"].isoformat(),
+                out["confirm_ts"].isoformat(),
+                out["start_file"],
+                out["confirm_file"],
+                ",".join(out["labels"]),
+                out["duration_sec_at_confirm"],
+            )
+            continue
+
+        if out.get("type") == "ended":
+            record = out["record"]
+            append_event_record(record)
+
+            print(
+                f"[INFO] illegally parked vehicles (ENDED): "
+                f"start_ts={record['start_ts']} end_ts={record['end_ts']} duration={record['duration_sec_total']}s"
+            )
+
+            logger.warning(
+                "Illegally parked vehicles ENDED. start_ts=%s confirm_ts=%s end_ts=%s duration_total=%ss labels=%s",
                 record["start_ts"],
                 record["confirm_ts"],
-                record["start_file"],
-                record["confirm_file"],
+                record["end_ts"],
+                record["duration_sec_total"],
                 ",".join(record["labels"]),
-                record["duration_sec_at_confirm"],
             )
-            append_event_record(record)
-        else:
-            # 你如果不想刷太多 info，可把这行改为 logger.debug
-            logger.info("Processed file=%s ts=%s has_vehicle=%s", fp.name, ts.isoformat(), hit)
+            continue
 
 
 # =========================
@@ -378,7 +408,7 @@ def main():
     logger.info("Events file   : %s", EVENTS_FILE)
     logger.info("Vehicle labels: %s", ",".join(sorted(VEHICLE_LABELS)))
     logger.info("Active window : %s-%s (Sydney)", ACTIVE_START, ACTIVE_END)
-    logger.info("Night window  : lastday %s -> today %s (Sydney)", NIGHT_START, NIGHT_END)
+    logger.info("Night window  : %s -> %s (Sydney)", NIGHT_START, NIGHT_END)
     logger.info("Params: PARK_THRESHOLD_SEC=%s MISS_TOLERANCE_SEC=%s POLL_INTERVAL_SEC=%s STALL_WARN_SEC=%s",
                 PARK_THRESHOLD_SEC, MISS_TOLERANCE_SEC, POLL_INTERVAL_SEC, STALL_WARN_SEC)
 
@@ -386,7 +416,6 @@ def main():
     fsm = ParkingEventFSM()
     last_latest_ts_holder: dict = {"latest_ts": None}
 
-    # 避免一开始就刷很多窗口日志：这里先打印一次
     dt0 = now_syd()
     w_start, w_end = night_window_range(dt0)
     logger.info("Night window (current run): %s -> %s", w_start.isoformat(), w_end.isoformat())
@@ -396,7 +425,7 @@ def main():
 
         if not is_active_window(dt):
             sec = seconds_until_next_active(dt)
-            logger.info("Outside active window. Sleep %d sec until next 10:00.", sec)
+            logger.info("Outside active window. Sleep %d sec until next 22:00.", sec)
             time.sleep(sec)
             continue
 
