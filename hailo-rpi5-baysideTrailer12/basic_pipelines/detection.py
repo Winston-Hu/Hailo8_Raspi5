@@ -23,11 +23,56 @@ class user_app_callback_class(app_callback_class):
         # 下面这几个属性是我们自己加的，用于保存结果
         self.resimage_dir = None
         self.reslabel_dir = None
+        self.rawimage_dir = None
         self.output_stem = "frame"
         self.saved_once = False  # 只保存第一帧
 
     def new_function(self):  # New function example
         return "The meaning of life is: "
+
+
+def _extract_ts_from_stem(stem: str) -> int | None:
+    """
+    从文件名 stem 中抽取最后一个纯数字段作为时间戳，例如：
+    snapshot_1765855891 -> 1765855891
+    如果没有数字段，返回 None。
+    """
+    parts = stem.split("_")
+    for part in reversed(parts):
+        if part.isdigit():
+            return int(part)
+    return None
+
+
+def cleanup_old_images(current_stem: str, raw_dir: Path | None, resimage_dir: Path | None):
+    """
+    删除当前时间戳之前的 rawimage/*.jpg 和 resimage/*.jpg。
+    reslabel 不动。
+    """
+    current_ts = _extract_ts_from_stem(current_stem)
+    if current_ts is None:
+        print(f"[CLEANUP] Cannot parse timestamp from stem '{current_stem}', skip cleanup.")
+        return
+
+    def _delete_older_jpgs(folder: Path, folder_name: str):
+        if not folder or not folder.exists():
+            return
+        for jpg in folder.glob("*.jpg"):
+            ts = _extract_ts_from_stem(jpg.stem)
+            if ts is None:
+                continue
+            if ts < current_ts:
+                try:
+                    jpg.unlink()
+                    print(f"[CLEANUP] Deleted old {folder_name} file: {jpg.name}")
+                except Exception as e:
+                    print(f"[CLEANUP][WARN] Failed to delete {jpg}: {e}")
+
+    if raw_dir:
+        _delete_older_jpgs(raw_dir, "rawimage")
+    if resimage_dir:
+        _delete_older_jpgs(resimage_dir, "resimage")
+
 
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
@@ -170,6 +215,16 @@ def app_callback(pad, info, user_data: user_app_callback_class):
         except Exception as e:
             print(f"[WARN] Failed to save label file: {e}")
 
+        # 3) 保存完成后，清理当前时间戳之前的 rawimage / resimage
+        try:
+            cleanup_old_images(
+                current_stem=user_data.output_stem,
+                raw_dir=user_data.rawimage_dir,
+                resimage_dir=user_data.resimage_dir,
+            )
+        except Exception as e:
+            print(f"[CLEANUP][WARN] Cleanup failed: {e}")
+
         user_data.saved_once = True
 
     print(string_to_print)
@@ -191,8 +246,10 @@ if __name__ == "__main__":
     # 准备输出目录
     resimage_dir = project_root / "resimage"
     reslabel_dir = project_root / "reslabel"
+    rawimage_dir = project_root / "rawimage"
     resimage_dir.mkdir(exist_ok=True)
     reslabel_dir.mkdir(exist_ok=True)
+    rawimage_dir.mkdir(exist_ok=True)
 
     # Create an instance of the user app callback class
     user_data = user_app_callback_class()
@@ -200,6 +257,7 @@ if __name__ == "__main__":
     # 先给一下输出目录
     user_data.resimage_dir = resimage_dir
     user_data.reslabel_dir = reslabel_dir
+    user_data.rawimage_dir = rawimage_dir
 
     app = GStreamerDetectionApp(app_callback, user_data)
 
