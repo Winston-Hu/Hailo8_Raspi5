@@ -24,7 +24,22 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
+import socket
+import paho.mqtt.client as mqtt
 
+
+# =========================
+# MQTT 配置（用于 CONFIRMED 推送）
+# =========================
+MQTT_HOST = "13.238.189.183"
+MQTT_PORT = 1883
+MQTT_USERNAME = "test"
+MQTT_PASSWORD = "2143test"
+
+MQTT_TOPIC = "/AI_monitor/illegally_parked_vehicle/BaysideTrailer12"
+MQTT_CLIENT_ID = f"checkreslabel_findnx_{socket.gethostname()}"
+MQTT_QOS = 1
+MQTT_KEEPALIVE = 30
 
 # =========================
 # 路径配置（与 readraw_detection.py 同级）
@@ -47,7 +62,7 @@ ACTIVE_START = dtime(21, 0, 0)
 ACTIVE_END   = dtime(7, 0, 0)
 
 # 夜间检查窗口：同样是 22:00 -> 06:00（实时“当前这晚”）
-NIGHT_START = dtime(7, 0, 0)
+NIGHT_START = dtime(22, 0, 0)
 NIGHT_END   = dtime(6, 0, 0)
 
 # =========================
@@ -102,6 +117,31 @@ logger.propagate = False
 # =========================
 # 工具函数
 # =========================
+def mqtt_publish_confirm(payload: dict) -> None:
+    """
+    在 CONFIRMED 时发布 MQTT 消息。
+    设计原则：失败不影响主流程，只打日志。
+    """
+    try:
+        client = mqtt.Client(client_id=MQTT_CLIENT_ID, clean_session=True)
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+        # 连接（阻塞式，快速失败）
+        client.connect(MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE)
+
+        # 发布
+        msg = json.dumps(payload, ensure_ascii=False)
+        info = client.publish(MQTT_TOPIC, msg, qos=MQTT_QOS, retain=False)
+
+        # 等待发送结果（避免立刻退出导致消息没发出去）
+        info.wait_for_publish(timeout=3)
+
+        client.disconnect()
+        logger.info("MQTT published CONFIRMED to topic=%s payload=%s", MQTT_TOPIC, msg)
+    except Exception as e:
+        logger.warning("MQTT publish failed: %s", e)
+
+
 def now_syd() -> datetime:
     return datetime.now(TZ)
 
@@ -376,6 +416,17 @@ def scan_reslabel_for_night(dt: datetime, processed: set[str], fsm: ParkingEvent
                 ",".join(out["labels"]),
                 out["duration_sec_at_confirm"],
             )
+            # 发送 MQTT（CONFIRMED 一次）
+            mqtt_payload = {
+                "type": "illegally_parked_vehicle_confirmed",
+                "start_ts": out["start_ts"].isoformat(),
+                "confirm_ts": out["confirm_ts"].isoformat(),
+                "start_file": out["start_file"],
+                "confirm_file": out["confirm_file"],
+                "labels": out["labels"],
+                "duration_sec_at_confirm": out["duration_sec_at_confirm"],
+            }
+            mqtt_publish_confirm(mqtt_payload)
             continue
 
         if out.get("type") == "ended":
