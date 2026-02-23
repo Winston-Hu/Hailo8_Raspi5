@@ -1,0 +1,72 @@
+{
+  "project_root": "/home/pi/hailo-rpi5-examples",
+
+  "nx": {
+    "server_url": "http://172.16.210.99:7001",
+    "username": "admin",
+    "password": "YOUR_NX_PASSWORD",
+    "source": "ParkingDemo"
+  },
+
+  "email": {
+    "enabled": false,
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "username": "user@example.com",
+    "password": "YOUR_SMTP_PASSWORD",
+    "from": "user@example.com",
+    "to": ["receiver@example.com"],
+    "subject_prefix": "[ParkingDemo]"
+  },
+
+  "cameras": [
+    {
+      "camera_id": "BaysideTrailer12_101",
+      "rtsp_url": "rtsp://admin:31415926Pi@192.168.1.101:554/Streaming/Channels/101",
+
+      "paths": {
+        "rawimage_dir": "rawimage",
+        "reslabel_dir": "reslabel",
+        "logs_dir": "logs"
+      },
+
+      "frame": {
+        "width": 640,
+        "height": 360
+      },
+
+      "confidence_threshold": 0.55,
+
+      "labels": ["car", "truck", "bus", "van", "motorcycle", "motorbike", "trailer", "ute", "pickup", "suv", "taxi"],
+
+      "aoi": {
+        "type": "polygon_norm",
+        "points": [
+          [0.18, 0.55],
+          [0.62, 0.50],
+          [0.80, 0.92],
+          [0.22, 0.95]
+        ]
+      },
+
+      "schedule": {
+        "timezone": "Australia/Sydney",
+        "windows": [
+          {
+            "start": "21:00",
+            "end": "05:00",
+            "max_park_minutes": 0,
+            "grace_minutes": 1
+          }
+        ]
+      },
+
+      "logic": {
+        "confirm_after_sec": 5,
+        "miss_tolerance_sec": 20,
+        "poll_interval_sec": 2,
+        "emit_leave_event": false
+      }
+    }
+  ]
+}
