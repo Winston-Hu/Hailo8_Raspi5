@@ -1,0 +1,36 @@
+{
+  "config_reload_interval": 30,
+  "cameras": [
+    {
+      "id": 1,
+      "name": "Camera_imageCapture",
+      "ip": "192.168.72.233",
+      "port": 554,
+      "username": "admin",
+      "password": "1234qwer",
+      "channel": 101,
+      "enabled": true
+    },
+    {
+      "id": 2,
+      "name": "Camera_Moving",
+      "ip": "192.168.72.229",
+      "port": 554,
+      "ptz_port": 80,
+      "username": "admin",
+      "password": "31415926Pi",
+      "channel": 101,
+      "enabled": true
+    }
+  ],
+  "detection": {
+    "frame_rate": 1,
+    "score_threshold": 0.3
+  },
+  "snapshots":{
+    "left_up": [474,1080],
+    "left_bottom": [495,1401],
+    "right_up": [1191,1053],
+    "right_bottom": [1230,1386]
+  }
+}
